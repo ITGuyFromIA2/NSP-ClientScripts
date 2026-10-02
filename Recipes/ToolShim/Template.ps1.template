@@ -52,6 +52,7 @@ function Stop-Shim([string]$Message) {
 # 1. Elevate. Inline on purpose: no NSP module is available yet.
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if ($NoElevate) { $env:NSP_NO_ELEVATE = '1' }   # the tool's own elevation check honours this too
 if (-not $isAdmin -and -not $NoElevate) {
     $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
     if ($ModuleRoot) { $relaunch += @('-ModuleRoot', ('"' + $ModuleRoot.TrimEnd('\') + '"')) }
