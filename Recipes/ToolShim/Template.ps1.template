@@ -1,0 +1,111 @@
+<#
+.SYNOPSIS
+    Launches {{ToolName:Text}} (PowerShell module {{ModuleName:Text}}). Prepared for: {{Company}}.
+
+.DESCRIPTION
+    Generated {{GENERATED_UTC}} by {{GeneratedBy}} - NSP.ClientScripts {{ENGINE_VERSION}}, recipe {{RECIPE_NAME}} v{{RECIPE_VERSION}}.
+
+    Right-click > Run with PowerShell, or run it from a PowerShell prompt. It:
+      1. relaunches itself elevated (UAC) if needed;
+      2. installs or updates the NSP modules it needs from the PowerShell Gallery - this server
+         needs HTTPS access to www.powershellgallery.com (or use -ModuleRoot);
+      3. hands the answers embedded below to the tool once - the tool keeps them in
+         %ProgramData%\NSP\Toolkit (Administrators and SYSTEM only) - and blanks them from this file;
+      4. starts the tool.
+
+.PARAMETER ModuleRoot
+    Load the modules from this folder (one sub-folder per module) instead of installing them from
+    the Gallery - for testing unreleased modules or a server with no Gallery access.
+
+.PARAMETER NoElevate
+    Run without elevating (read-only use, testing). Modules then install for the current user.
+#>
+[CmdletBinding()]
+param(
+    [string]$ModuleRoot,
+    [switch]$NoElevate
+)
+$ErrorActionPreference = 'Stop'
+
+$ToolName                = {{ToolName}}
+$ModuleName              = {{ModuleName}}
+$ModuleMinimumVersion    = {{ModuleMinimumVersion}}
+$EntryFunction           = {{EntryFunction}}
+$BootstrapMinimumVersion = {{BootstrapMinimumVersion}}
+$RequiredModulesJson = @'
+{{Modules}}
+'@
+
+# <NSP:SeedAnswers> - blanked automatically once the tool has taken them.
+$SeedAnswersJson = @'
+{{SeedAnswers}}
+'@
+# </NSP:SeedAnswers>
+
+function Stop-Shim([string]$Message) {
+    Write-Host ''
+    Write-Host $Message -ForegroundColor Red
+    if (-not $env:NSP_SHIM_NONINTERACTIVE) { Read-Host 'Press Enter to close' | Out-Null }
+    exit 1
+}
+
+# 1. Elevate. Inline on purpose: no NSP module is available yet.
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin -and -not $NoElevate) {
+    $relaunch = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
+    if ($ModuleRoot) { $relaunch += @('-ModuleRoot', ('"' + $ModuleRoot.TrimEnd('\') + '"')) }
+    Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList $relaunch -Verb RunAs
+    exit
+}
+
+# 2. Modules. Piped so a top-level JSON array unrolls the same way on 5.1 and 7.
+$requiredModules = @(ConvertFrom-Json $RequiredModulesJson | ForEach-Object { $_ })
+if ($ModuleRoot) {
+    if (-not (Test-Path -LiteralPath $ModuleRoot)) { Stop-Shim "ModuleRoot not found: $ModuleRoot" }
+    $env:PSModulePath = (Resolve-Path -LiteralPath $ModuleRoot).ProviderPath + [IO.Path]::PathSeparator + $env:PSModulePath
+} else {
+    $scope = if ($isAdmin) { 'AllUsers' } else { 'CurrentUser' }
+    try {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        } catch { Write-Verbose "TLS 1.2 could not be enabled: $_" }
+        if (-not (Get-Module -ListAvailable -Name NSP.Bootstrap | Where-Object { $_.Version -ge [version]$BootstrapMinimumVersion })) {
+            Write-Host 'Installing NSP.Bootstrap from the PowerShell Gallery...' -ForegroundColor Cyan
+            if (-not (Get-PackageProvider -ListAvailable -Name NuGet -ErrorAction SilentlyContinue | Where-Object { $_.Version -ge [version]'2.8.5.201' })) {
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope $scope | Out-Null
+            }
+            Install-Module -Name NSP.Bootstrap -MinimumVersion $BootstrapMinimumVersion -Repository PSGallery -Scope $scope -Force -AllowClobber
+        }
+        Import-Module NSP.Bootstrap -MinimumVersion $BootstrapMinimumVersion -Force
+        foreach ($m in $requiredModules) { Install-NSPModule -Name $m.Name -MinimumVersion $m.MinimumVersion -Scope $scope }
+    } catch {
+        Stop-Shim ("Could not install the modules $ToolName needs from the PowerShell Gallery: $($_.Exception.Message)`n" +
+            'This server needs HTTPS access to www.powershellgallery.com. Or copy the modules to a folder and run this script with -ModuleRoot <folder>.')
+    }
+}
+try {
+    Import-Module $ModuleName -MinimumVersion $ModuleMinimumVersion -Force
+} catch {
+    Stop-Shim "Could not load $ModuleName $ModuleMinimumVersion or later: $($_.Exception.Message)"
+}
+
+# 3. Hand the embedded answers to the tool once, then blank them in this file.
+if ($SeedAnswersJson.Trim()) {
+    & $EntryFunction -SeedAnswersJson $SeedAnswersJson -SeedOnly
+    try {
+        $self = [IO.File]::ReadAllText($PSCommandPath)
+        $pattern = "(?s)(# <NSP:SeedAnswers>[^\r\n]*\r?\n\`$SeedAnswersJson = @'\r?\n).*?(\r?\n'@\r?\n# </NSP:SeedAnswers>)"
+        $blanked = [regex]::Replace($self, $pattern, '$1$2')
+        $parseErrors = $null
+        [Management.Automation.Language.Parser]::ParseInput($blanked, [ref]$null, [ref]$parseErrors) | Out-Null
+        if ($blanked -ne $self -and -not $parseErrors) {
+            [IO.File]::WriteAllText($PSCommandPath, $blanked, (New-Object Text.UTF8Encoding($true)))
+        }
+    } catch {
+        Write-Warning "The tool has the answers, but they could not be removed from this file: $($_.Exception.Message)"
+    }
+}
+
+# 4. Start the tool.
+& $EntryFunction
