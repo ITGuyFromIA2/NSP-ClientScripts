@@ -211,3 +211,75 @@ Describe 'Generated ToolShim, run for real against a fake tool' {
         $run.Output | Should -Match 'Could not load NSP.FakeTool 9.0.0'
     }
 }
+
+Describe 'Installer recipes (ControlInstaller, HuntressInstaller)' {
+    BeforeAll {
+        $script:ControlBase = @{ BaseInstallerUri = 'https://contoso.screenconnect.com/Bin/ScreenConnect.ClientSetup.msi?e=Access&y=Guest'; ClientCode = 'Contoso Ltd'; DeviceType = 'Workstation'; Company = 'Contoso' }
+        $script:HuntressBase = @{ AccountKey = ('0123456789abcdef' * 2); OrganizationKey = 'Contoso'; Company = 'Contoso' }
+
+        function Get-ControlUriProbe([hashtable]$Parameters) {
+            # The rendered script up to its first side effect, then print the URL - no download.
+            $text = ConvertTo-NSPClientScript -Recipe ControlInstaller -Parameters $Parameters
+            $probe = Join-Path $TestDrive ('ControlProbe_' + [guid]::NewGuid().ToString('N') + '.ps1')
+            $head = $text.Substring(0, $text.IndexOf('New-Item -ItemType Directory')) + "`r`n`$installerUri`r`n"
+            [IO.File]::WriteAllText($probe, $head, (New-Object Text.UTF8Encoding($true)))
+            return $probe
+        }
+    }
+
+    It 'are listed alongside ToolShim' {
+        $names = @(Get-NSPClientScriptRecipe).Name
+        $names | Should -Contain 'ControlInstaller'
+        $names | Should -Contain 'HuntressInstaller'
+    }
+
+    It '<Recipe> renders a script that parses, and checks the signature before it installs' -TestCases @(
+        @{ Recipe = 'ControlInstaller'; Install = 'msiexec.exe' }
+        @{ Recipe = 'HuntressInstaller'; Install = 'Start-Process -FilePath $installerPath' }
+    ) {
+        $params = if ($Recipe -eq 'ControlInstaller') { $ControlBase } else { $HuntressBase }
+        $text = ConvertTo-NSPClientScript -Recipe $Recipe -Parameters $params
+        $text | Should -Not -Match '\{\{'
+        $parseErrors = $null
+        [Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$parseErrors) | Out-Null
+        @($parseErrors).Count | Should -Be 0
+        $sig = $text.IndexOf('Get-AuthenticodeSignature')
+        $sig | Should -BeGreaterThan 0
+        $text.IndexOf("-ne 'Valid'") | Should -BeGreaterThan $sig
+        $text.IndexOf($Install) | Should -BeGreaterThan $text.IndexOf("-ne 'Valid'")
+    }
+
+    It 'ControlInstaller refuses a non-HTTPS or non-MSI installer URL, and quotes in the client code' {
+        $http = $ControlBase.Clone(); $http.BaseInstallerUri = 'http://contoso.screenconnect.com/Bin/x.msi'
+        { ConvertTo-NSPClientScript -Recipe ControlInstaller -Parameters $http } | Should -Throw '*does not match*'
+        $exe = $ControlBase.Clone(); $exe.BaseInstallerUri = 'https://contoso.example/x.exe'
+        { ConvertTo-NSPClientScript -Recipe ControlInstaller -Parameters $exe } | Should -Throw '*does not match*'
+        $bad = $ControlBase.Clone(); $bad.ClientCode = "Contoso'; Stop-Computer"
+        { ConvertTo-NSPClientScript -Recipe ControlInstaller -Parameters $bad } | Should -Throw '*does not match*'
+    }
+
+    It 'ControlInstaller builds the positional custom-property query' {
+        & (Get-ControlUriProbe $ControlBase) -SessionName 'PC 01' |
+            Should -Be 'https://contoso.screenconnect.com/Bin/ScreenConnect.ClientSetup.msi?e=Access&y=Guest&t=PC%2001&c=Contoso%20Ltd&c=&c=&c=Workstation&c=&c=&c=&c='
+        $default = $ControlBase.Clone(); $default.Remove('DeviceType')
+        & (Get-ControlUriProbe $default) |
+            Should -Be 'https://contoso.screenconnect.com/Bin/ScreenConnect.ClientSetup.msi?e=Access&y=Guest&c=Contoso%20Ltd&c=&c=&c=&c=&c=&c=&c='
+    }
+
+    It 'HuntressInstaller refuses an account key that is not 32 hex characters' {
+        $bad = $HuntressBase.Clone(); $bad.AccountKey = 'not-a-key'
+        { ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters $bad } | Should -Throw '*does not match*'
+    }
+
+    It 'HuntressInstaller refuses a run-time organization key with a quote before touching the machine' {
+        $script = Join-Path $TestDrive 'Huntress.ps1'
+        $params = $HuntressBase + @{ DownloadDirectory = (Join-Path $TestDrive 'dl'); TranscriptDirectory = (Join-Path $TestDrive 'logs') }
+        New-NSPClientScript -Recipe HuntressInstaller -Parameters $params -Path $script -Force | Out-Null
+        # In process: 'exit' in a script run with & ends only that script. (A child process would
+        # mangle the embedded quote on its way through the 5.1 command line.)
+        $out = & $script -OrganizationKey 'Con"toso' | Out-String
+        $LASTEXITCODE | Should -Be 1
+        $out | Should -Match 'may not contain quotes'
+        Test-Path -LiteralPath (Join-Path $TestDrive 'dl') | Should -BeFalse
+    }
+}

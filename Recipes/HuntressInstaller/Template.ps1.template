@@ -1,0 +1,83 @@
+<#
+.SYNOPSIS
+    Installs the Huntress agent. Prepared for: {{Company}}.
+
+.DESCRIPTION
+    Generated {{GENERATED_UTC}} by {{GeneratedBy}} - NSP.ClientScripts {{ENGINE_VERSION}}, recipe {{RECIPE_NAME}} v{{RECIPE_VERSION}}.
+
+    THIS FILE CONTAINS THE HUNTRESS ACCOUNT KEY. Keep it where only administrators can read it.
+
+    Run elevated (RMM, GPO startup script or an admin prompt). If the Huntress agent is already
+    installed it does nothing (use -Reinstall to install over it). Otherwise it downloads the
+    installer for the account over HTTPS, checks that the file's Authenticode signature is valid
+    and from the expected signer, installs silently, and waits for the HuntressAgent service.
+    A transcript goes to the transcript folder below (the account key is never written to it).
+    Exit code 0 on success, 1 on any failure.
+
+.PARAMETER OrganizationKey
+    Join this organization instead of the one below.
+
+.PARAMETER Reinstall
+    Install even if the agent is already present.
+#>
+[CmdletBinding()]
+param(
+    [string]$OrganizationKey = {{OrganizationKey}},
+    [switch]$Reinstall
+)
+$ErrorActionPreference = 'Stop'
+
+$AccountKey            = {{AccountKey}}
+$ExpectedSignerPattern = {{ExpectedSignerPattern}}
+$DownloadDirectory     = {{DownloadDirectory}}
+$TranscriptDirectory   = {{TranscriptDirectory}}
+$AgentServiceName      = 'HuntressAgent'
+
+if ($OrganizationKey -match '["\r\n]') { Write-Output 'ERROR: OrganizationKey may not contain quotes or line breaks.'; exit 1 }
+
+New-Item -ItemType Directory -Path $DownloadDirectory, $TranscriptDirectory -Force | Out-Null
+$transcriptPath = Join-Path $TranscriptDirectory ('HuntressInstall_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.log')
+Start-Transcript -LiteralPath $transcriptPath -Append | Out-Null
+if (-not $Reinstall -and (Get-Service -Name $AgentServiceName -ErrorAction SilentlyContinue)) {
+    Write-Output 'The Huntress agent is already installed. Nothing to do (use -Reinstall to install over it).'
+    Stop-Transcript | Out-Null
+    exit 0
+}
+$exitCode = 1
+$installerPath = Join-Path $DownloadDirectory 'HuntressInstaller.exe'
+try {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch { Write-Warning "TLS 1.2 could not be enabled: $_" }
+    Write-Output "Downloading the Huntress installer for organization '$OrganizationKey'..."
+    Invoke-WebRequest -Uri ('https://update.huntress.io/download/' + $AccountKey + '/HuntressInstaller.exe') -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
+    Unblock-File -LiteralPath $installerPath -ErrorAction Stop
+
+    $signature = Get-AuthenticodeSignature -FilePath $installerPath
+    $signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '(unsigned)' }
+    if ($signature.Status -ne 'Valid') { throw "The installer's signature is not valid ($($signature.Status), signer $signer). Not installing." }
+    if ($signer -notmatch $ExpectedSignerPattern) { throw "The installer is signed by '$signer', which does not match '$ExpectedSignerPattern'. Not installing." }
+    Write-Output "Signature valid: $signer"
+
+    # Not echoed: the argument list carries the account key.
+    $installArgs = '/ACCT_KEY="' + $AccountKey + '" /ORG_KEY="' + $OrganizationKey + '" /S'
+    $process = Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -PassThru
+    if ($process.ExitCode -ne 0) { throw "The Huntress installer failed with exit code $($process.ExitCode)." }
+
+    $deadline = (Get-Date).AddMinutes(2)
+    do {
+        $service = Get-Service -Name $AgentServiceName -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -eq 'Running') { break }
+        Start-Sleep -Seconds 5
+    } while ((Get-Date) -lt $deadline)
+    if (-not $service) { throw "The installer finished but the $AgentServiceName service does not exist. See %ProgramFiles%\Huntress\HuntressAgent.log." }
+    if ($service.Status -ne 'Running') { throw "The $AgentServiceName service is $($service.Status), not Running. See %ProgramFiles%\Huntress\HuntressAgent.log." }
+    Write-Output 'The Huntress agent is installed and running.'
+    $exitCode = 0
+} catch {
+    Write-Output "ERROR: $($_.Exception.Message)"
+} finally {
+    Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
+    Stop-Transcript | Out-Null
+}
+exit $exitCode

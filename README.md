@@ -33,6 +33,28 @@ New-NSPToolShim -ToolName 'AD Manager' -ModuleName NSP.ActiveDirectory -ModuleMi
     -EntryFunction Start-NSPADManager -SeedAnswers @{ CompanyName = 'Example Co' } -Path C:\Temp\AD-Manager.ps1
 ```
 
+## Installer recipes
+
+Both write a standalone script to run elevated (RMM, GPO startup script, admin prompt). It downloads
+the vendor's installer over HTTPS and **refuses to run it unless its Authenticode signature is valid
+and the signer matches `ExpectedSignerPattern`**, installs silently, keeps a transcript under
+`TranscriptDirectory`, and exits 0 or 1.
+
+| Recipe | Parameters | Notes |
+|---|---|---|
+| `ControlInstaller` | `BaseInstallerUri` (HTTPS `.msi` link of your instance's access agent), `ClientCode`, `DeviceType` (default `ScriptDefault`, i.e. blank) | Client is custom property 1, device type property 5. The script takes `-SessionName`. Exit 3010 (reboot pending) counts as success. |
+| `HuntressInstaller` | `AccountKey` (32 hex), `OrganizationKey` | Skips if the `HuntressAgent` service exists (`-Reinstall` to override); waits up to 2 minutes for the service to run. **The generated file contains the account key.** |
+
+```powershell
+New-NSPClientScript -Recipe ControlInstaller -Path .\Contoso_Control.ps1 -Parameters @{
+    BaseInstallerUri = 'https://contoso.screenconnect.com/Bin/ScreenConnect.ClientSetup.msi?e=Access&y=Guest'
+    ClientCode = 'Contoso'; DeviceType = 'Workstation'; Company = 'Contoso'
+}
+New-NSPClientScript -Recipe HuntressInstaller -Path .\Contoso_Huntress.ps1 -Parameters @{
+    AccountKey = (Get-NSPSecret -Name Huntress.AccountKey -AsPlainText); OrganizationKey = 'Contoso'
+}
+```
+
 ## Recipes
 
 A recipe is a folder with `Recipe.psd1` and a template:

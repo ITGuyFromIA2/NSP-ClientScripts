@@ -3,6 +3,12 @@
 All notable changes to NSP.ClientScripts are documented here. Versions follow
 [SemVer](https://semver.org/). `0.x` until it has real use outside NSP.
 
+## 0.1.2
+
+- New recipes `ControlInstaller` (ConnectWise Control access agent, from the Cookbook prototype) and
+  `HuntressInstaller` (Huntress agent). Both verify the installer's Authenticode signature and signer
+  before running it, install silently, keep a transcript and exit 0/1.
+
 ## 0.1.1
 
 - From the 2026-10-02 review: removed an unused copy of the sibling-module loader (this module needs

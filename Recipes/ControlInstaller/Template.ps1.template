@@ -1,0 +1,61 @@
+<#
+.SYNOPSIS
+    Installs the ConnectWise Control access agent. Prepared for: {{Company}}.
+
+.DESCRIPTION
+    Generated {{GENERATED_UTC}} by {{GeneratedBy}} - NSP.ClientScripts {{ENGINE_VERSION}}, recipe {{RECIPE_NAME}} v{{RECIPE_VERSION}}.
+
+    Run elevated (RMM, GPO startup script or an admin prompt). It downloads the access-agent MSI
+    over HTTPS, checks that the file's Authenticode signature is valid and from the expected
+    signer, then runs msiexec /qn. A transcript goes to the transcript folder below.
+    Exit code 0 on success (including 3010, reboot pending), 1 on any failure.
+
+.PARAMETER SessionName
+    Session name for this machine (the &t= property). Default: Control's own default (the computer name).
+#>
+[CmdletBinding()]
+param([string]$SessionName = 'ScriptDefault')
+$ErrorActionPreference = 'Stop'
+
+$BaseInstallerUri      = {{BaseInstallerUri}}
+$ClientCode            = {{ClientCode}}
+$DeviceType            = {{DeviceType}}
+$ExpectedSignerPattern = {{ExpectedSignerPattern}}
+$DownloadDirectory     = {{DownloadDirectory}}
+$TranscriptDirectory   = {{TranscriptDirectory}}
+
+# Custom properties are positional: &c= 1..8. Client is property 1, device type property 5.
+$installerUri = $BaseInstallerUri
+if ($SessionName -ne 'ScriptDefault') { $installerUri += '&t=' + [uri]::EscapeDataString($SessionName) }
+if ($ClientCode -ne 'ScriptDefault') { $installerUri += '&c=' + [uri]::EscapeDataString($ClientCode) + '&c=&c=' } else { $installerUri += '&c=&c=&c=' }
+if ($DeviceType -ne 'ScriptDefault') { $installerUri += '&c=' + [uri]::EscapeDataString($DeviceType) + '&c=&c=&c=&c=' } else { $installerUri += '&c=&c=&c=&c=&c=' }
+
+New-Item -ItemType Directory -Path $DownloadDirectory, $TranscriptDirectory -Force | Out-Null
+$transcriptPath = Join-Path $TranscriptDirectory ('ControlInstall_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.log')
+Start-Transcript -LiteralPath $transcriptPath -Append | Out-Null
+$exitCode = 1
+try {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch { Write-Warning "TLS 1.2 could not be enabled: $_" }
+    $installerPath = Join-Path $DownloadDirectory 'ScreenConnect.ClientSetup.msi'
+    Write-Output "Downloading the Control installer for client '$ClientCode'..."
+    Invoke-WebRequest -Uri $installerUri -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
+    Unblock-File -LiteralPath $installerPath -ErrorAction Stop
+
+    $signature = Get-AuthenticodeSignature -FilePath $installerPath
+    $signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '(unsigned)' }
+    if ($signature.Status -ne 'Valid') { throw "The installer's signature is not valid ($($signature.Status), signer $signer). Not installing." }
+    if ($signer -notmatch $ExpectedSignerPattern) { throw "The installer is signed by '$signer', which does not match '$ExpectedSignerPattern'. Not installing." }
+    Write-Output "Signature valid: $signer"
+
+    $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/qn', '/i', ('"' + $installerPath + '"')) -Wait -PassThru
+    if ($process.ExitCode -notin @(0, 3010)) { throw "msiexec failed with exit code $($process.ExitCode)." }
+    Write-Output "Control installer completed with exit code $($process.ExitCode)."
+    $exitCode = 0
+} catch {
+    Write-Output "ERROR: $($_.Exception.Message)"
+} finally {
+    Stop-Transcript | Out-Null
+}
+exit $exitCode
