@@ -1,6 +1,6 @@
 @{
     RootModule        = 'NSP.ClientScripts.psm1'
-    ModuleVersion     = '0.1.2'
+    ModuleVersion     = '0.1.3'
     GUID              = '6c5a13bd-c8c8-482d-9135-ba8ca67d9ed3'
     Author            = 'Network Systems Plus'
     CompanyName       = 'Network Systems Plus'
