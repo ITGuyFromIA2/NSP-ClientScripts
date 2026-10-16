@@ -3,6 +3,18 @@
 All notable changes to NSP.ClientScripts are documented here. Versions follow
 [SemVer](https://semver.org/). `0.x` until it has real use outside NSP.
 
+## 0.1.4
+
+- `HuntressInstaller` recipe v3: an installed agent is checked, not just found - **orphaned** (`bad status code: 401`
+  in the agent log's last lines) or registered to **another account** is re-registered (the new installer is
+  downloaded and signature-checked first, then `Uninstall.exe /S` and the registry key go, then a fresh install),
+  at most once per `RetryDays` (default 7) per computer; registered to **another organization** is reported only.
+  Status values: Installed, Reinstalled, AlreadyInstalled, OrgMismatch, Orphaned, AccountMismatch, Failed.
+- Also: checks for an installed agent before starting a transcript (a GPO task
+  runs it at every unlock), names transcripts by computer, and with the new `ReportDirectory` (a UNC
+  folder) writes `Status\<COMPUTER>.json` on every run and copies install transcripts to
+  `Transcripts\`. Used by NSP.ActiveDirectory's `Import-NSPADGpoRecipe -Recipe Huntress`.
+
 ## 0.1.3
 
 - Release routine: `tools\Publish-ToGallery.ps1` now runs `Publish-NSPModule` from NSP.RepoTools, the checks every NSP module shares (including a client-reference sweep of the Git history). No change to the module itself.

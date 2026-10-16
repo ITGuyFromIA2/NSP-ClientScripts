@@ -282,4 +282,66 @@ Describe 'Installer recipes (ControlInstaller, HuntressInstaller)' {
         $out | Should -Match 'may not contain quotes'
         Test-Path -LiteralPath (Join-Path $TestDrive 'dl') | Should -BeFalse
     }
+
+    It 'HuntressInstaller exits on an installed agent before it starts a transcript, and names logs by computer' {
+        # A GPO task runs it at every unlock - an installed machine must not collect a log per run.
+        $text = ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters $HuntressBase
+        $text.IndexOf('Get-Service -Name $AgentServiceName') | Should -BeLessThan $text.IndexOf('Start-Transcript')
+        $text | Should -Match "'HuntressInstall_' \+ \`$env:COMPUTERNAME"
+    }
+
+    It 'HuntressInstaller sorts an installed agent: orphaned (401), foreign account, other org, healthy' {
+        $text = ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters $HuntressBase
+        $ast = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$null)
+        foreach ($name in 'Get-HuntressHealth', 'Test-HuntressRetryDue') {
+            $fn = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }.GetNewClosure(), $true)
+            . ([scriptblock]::Create($fn.Extent.Text))
+        }
+        Set-Variable -Name AccountKey -Value $HuntressBase.AccountKey
+        Set-Variable -Name OrganizationKey -Value 'Contoso'
+        Get-HuntressHealth -LogTail @('x', 'post request - bad status code: 401') -RegisteredAccountKey $HuntressBase.AccountKey | Should -Be 'Orphaned'
+        Get-HuntressHealth -LogTail @('post request - bad status code: 403') -RegisteredAccountKey $HuntressBase.AccountKey -RegisteredOrganizationKey 'Contoso' | Should -Be 'Healthy'
+        Get-HuntressHealth -RegisteredAccountKey ('f' * 32) -RegisteredOrganizationKey 'Contoso' | Should -Be 'AccountMismatch'
+        Get-HuntressHealth -RegisteredAccountKey $HuntressBase.AccountKey -RegisteredOrganizationKey 'Other' | Should -Be 'OrgMismatch'
+        Get-HuntressHealth | Should -Be 'Healthy'
+        $marker = Join-Path $TestDrive 'marker.txt'
+        Test-HuntressRetryDue -MarkerPath $marker -Days 7 | Should -BeTrue
+        Set-Content -LiteralPath $marker -Value 'x'
+        Test-HuntressRetryDue -MarkerPath $marker -Days 7 | Should -BeFalse
+        (Get-Item -LiteralPath $marker).LastWriteTimeUtc = [DateTime]::UtcNow.AddDays(-8)
+        Test-HuntressRetryDue -MarkerPath $marker -Days 7 | Should -BeTrue
+    }
+
+    It 'HuntressInstaller verifies the new installer before it removes a broken agent' {
+        $text = ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters $HuntressBase
+        $text.IndexOf("if (`$signer -notmatch") | Should -BeLessThan $text.IndexOf("    Remove-HuntressAgent`r`n")
+        $text | Should -Match "\`$RetryDays             = '7'"
+    }
+
+    It 'HuntressInstaller takes a UNC report folder, or none' {
+        { ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters ($HuntressBase + @{ ReportDirectory = 'C:\Reports' }) } | Should -Throw '*does not match*'
+        (ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters ($HuntressBase + @{ ReportDirectory = '\\fileserver\GPO_Share$\Huntress' })) | Should -Match ([regex]::Escape("`$ReportDirectory       = '\\fileserver\GPO_Share`$\Huntress'"))
+        (ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters $HuntressBase) | Should -Match ([regex]::Escape("`$ReportDirectory       = ''"))
+    }
+
+    It 'HuntressInstaller reports a status file and copies the transcript, without the account key' {
+        $text = ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters ($HuntressBase + @{ ReportDirectory = '\\fileserver\GPO_Share$\Huntress' })
+        $ast = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$null)
+        $fn = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Send-HuntressReport' }, $true)
+        $folderFn = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-HuntressFolder' }, $true)
+        . ([scriptblock]::Create($folderFn.Extent.Text))
+        $report = Join-Path $TestDrive 'report'
+        New-Item -ItemType Directory -Path (Join-Path $report 'Status'), (Join-Path $report 'Transcripts') -Force | Out-Null
+        $log = Join-Path $TestDrive 'HuntressInstall_PC1_20260101_000000.log'
+        Set-Content -LiteralPath $log -Value 'transcript text'
+        # The script-level variables the function reads.
+        Set-Variable -Name ReportDirectory -Value $report
+        Set-Variable -Name OrganizationKey -Value 'Contoso'
+        . ([scriptblock]::Create($fn.Extent.Text))
+        Send-HuntressReport -Status 'Installed' -Detail 'ok' -TranscriptPath $log
+        $status = Get-Content -LiteralPath (Join-Path $report "Status\$env:COMPUTERNAME.json") -Raw
+        ($status | ConvertFrom-Json).Status | Should -Be 'Installed'
+        $status | Should -Not -Match $HuntressBase.AccountKey
+        Get-Content -LiteralPath (Join-Path $report 'Transcripts\HuntressInstall_PC1_20260101_000000.log') -Raw | Should -Match 'transcript text'
+    }
 }

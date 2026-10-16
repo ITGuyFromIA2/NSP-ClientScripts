@@ -43,7 +43,7 @@ and the signer matches `ExpectedSignerPattern`**, installs silently, keeps a tra
 | Recipe | Parameters | Notes |
 |---|---|---|
 | `ControlInstaller` | `BaseInstallerUri` (HTTPS `.msi` link of your instance's access agent), `ClientCode`, `DeviceType` (default `ScriptDefault`, i.e. blank) | Client is custom property 1, device type property 5. The script takes `-SessionName`. Exit 3010 (reboot pending) counts as success. |
-| `HuntressInstaller` | `AccountKey` (32 hex), `OrganizationKey` | Skips if the `HuntressAgent` service exists (`-Reinstall` to override); waits up to 2 minutes for the service to run. **The generated file contains the account key.** |
+| `HuntressInstaller` | `AccountKey` (32 hex), `OrganizationKey` | Skips if the `HuntressAgent` service exists (`-Reinstall` to override) - before any transcript; waits up to 2 minutes for the service to run. Optional `ReportDirectory` (UNC): `Status\<COMPUTER>.json` every run, install transcripts to `Transcripts\`. **The generated file contains the account key.** For a GPO deployment use NSP.ActiveDirectory's `Import-NSPADGpoRecipe -Recipe Huntress`. |
 
 ```powershell
 New-NSPClientScript -Recipe ControlInstaller -Path .\Contoso_Control.ps1 -Parameters @{

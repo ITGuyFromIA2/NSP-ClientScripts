@@ -1,24 +1,40 @@
 <#
 .SYNOPSIS
-    Installs the Huntress agent. Prepared for: {{Company}}.
+    Installs the Huntress agent, and repairs an orphaned or foreign one. Prepared for: {{Company}}.
 
 .DESCRIPTION
     Generated {{GENERATED_UTC}} by {{GeneratedBy}} - NSP.ClientScripts {{ENGINE_VERSION}}, recipe {{RECIPE_NAME}} v{{RECIPE_VERSION}}.
 
-    THIS FILE CONTAINS THE HUNTRESS ACCOUNT KEY. Keep it where only administrators can read it.
+    THIS FILE CONTAINS THE HUNTRESS ACCOUNT KEY. Keep it where only administrators (and the
+    computers that run it) can read it.
 
-    Run elevated (RMM, GPO startup script or an admin prompt). If the Huntress agent is already
-    installed it does nothing (use -Reinstall to install over it). Otherwise it downloads the
-    installer for the account over HTTPS, checks that the file's Authenticode signature is valid
-    and from the expected signer, installs silently, and waits for the HuntressAgent service.
-    A transcript goes to the transcript folder below (the account key is never written to it).
-    Exit code 0 on success, 1 on any failure.
+    Run elevated (RMM, the NSP Huntress GPO - Import-NSPADGpoRecipe -Recipe Huntress - or an admin
+    prompt). When the HuntressAgent service exists it checks the agent, without a transcript:
+      Healthy          - exit 0.
+      OrgMismatch      - registered to another organization of this account: reported only (an
+                         agent moved between organizations in the portal keeps its old key here).
+      Orphaned         - the last lines of HuntressAgent.log show 'bad status code: 401' (the
+                         agent was removed on the Huntress side) - re-registered.
+      AccountMismatch  - registered to another Huntress account - re-registered.
+    A re-registration is tried at most once every {{RetryDays:Text}} days per computer; in between
+    the state is reported and the script exits 1. -Reinstall installs over a healthy agent.
+
+    An install downloads the installer for the account over HTTPS, refuses it unless its
+    Authenticode signature is valid and from the expected signer, removes an orphaned or foreign
+    agent only then (Uninstall.exe /S, then its registry key), installs silently, and waits for
+    the HuntressAgent service. A transcript goes to the transcript folder below (the account key is
+    never written to it). Exit code 0 on success, 1 on any failure.
+
+    With a report folder set, every run also writes <report>\Status\<COMPUTER>.json (Installed,
+    Reinstalled, AlreadyInstalled, OrgMismatch, Orphaned, AccountMismatch or Failed), and an
+    install copies its transcript to <report>\Transcripts. A report that can't be written is a
+    warning, never a failure.
 
 .PARAMETER OrganizationKey
     Join this organization instead of the one below.
 
 .PARAMETER Reinstall
-    Install even if the agent is already present.
+    Install even if the agent is present and healthy.
 #>
 [CmdletBinding()]
 param(
@@ -31,19 +47,121 @@ $AccountKey            = {{AccountKey}}
 $ExpectedSignerPattern = {{ExpectedSignerPattern}}
 $DownloadDirectory     = {{DownloadDirectory}}
 $TranscriptDirectory   = {{TranscriptDirectory}}
+$ReportDirectory       = {{ReportDirectory}}
+$RetryDays             = {{RetryDays}}
 $AgentServiceName      = 'HuntressAgent'
+$AgentRegistryKey      = 'HKLM:\SOFTWARE\Huntress Labs'
+$RetryMarker           = Join-Path $DownloadDirectory 'HuntressReregister.txt'
+
+function Send-HuntressReport {
+    # Status file (and optionally the transcript) to the report folder. Written with WriteAllText,
+    # not Copy-Item: the share grants computers create/write only, not write-attributes.
+    param([string]$Status, [string]$Detail, [string]$TranscriptPath)
+    if (-not $ReportDirectory) { return }
+    try {
+        $version = ''
+        $agentExe = Join-Path (Get-HuntressFolder) 'HuntressAgent.exe'
+        if (Test-Path -LiteralPath $agentExe) { $version = [string](Get-Item -LiteralPath $agentExe).VersionInfo.FileVersion }
+        $record = [ordered]@{
+            ComputerName    = $env:COMPUTERNAME
+            Status          = $Status
+            Detail          = $Detail
+            AgentVersion    = $version
+            OrganizationKey = $OrganizationKey
+            TimeUtc         = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+            Script          = '{{RECIPE_NAME}} v{{RECIPE_VERSION}}'
+        }
+        $utf8 = New-Object Text.UTF8Encoding($false)
+        [IO.File]::WriteAllText((Join-Path $ReportDirectory ('Status\' + $env:COMPUTERNAME + '.json')), (ConvertTo-Json -InputObject $record), $utf8)
+        if ($TranscriptPath -and (Test-Path -LiteralPath $TranscriptPath)) {
+            $target = Join-Path $ReportDirectory ('Transcripts\' + (Split-Path -Leaf $TranscriptPath))
+            [IO.File]::WriteAllText($target, [IO.File]::ReadAllText($TranscriptPath), $utf8)
+        }
+    } catch {
+        Write-Warning "Could not write the report to ${ReportDirectory}: $($_.Exception.Message)"
+    }
+}
+
+function Get-HuntressFolder {
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($root -and (Test-Path -LiteralPath (Join-Path $root 'Huntress'))) { return (Join-Path $root 'Huntress') }
+    }
+    return (Join-Path $env:ProgramFiles 'Huntress')
+}
+
+function Get-HuntressHealth {
+    # Reads only its arguments and the script's keys. Healthy, OrgMismatch, Orphaned or AccountMismatch, from the agent log's last lines and
+    # the registered keys (blank registered values are not a mismatch - older agents may lack them).
+    param([string[]]$LogTail = @(), [string]$RegisteredAccountKey, [string]$RegisteredOrganizationKey)
+    if (@($LogTail | Where-Object { $_ -like '*bad status code: 401*' }).Count) { return 'Orphaned' }
+    if ($RegisteredAccountKey -and $RegisteredAccountKey -ne $AccountKey) { return 'AccountMismatch' }
+    if ($RegisteredOrganizationKey -and $RegisteredOrganizationKey -ne $OrganizationKey) { return 'OrgMismatch' }
+    return 'Healthy'
+}
+
+function Test-HuntressRetryDue {
+    # True when no re-registration was tried here in the last $RetryDays days.
+    param([string]$MarkerPath, [int]$Days)
+    if (-not (Test-Path -LiteralPath $MarkerPath)) { return $true }
+    return ((Get-Item -LiteralPath $MarkerPath).LastWriteTimeUtc -lt [DateTime]::UtcNow.AddDays(-$Days))
+}
+
+function Remove-HuntressAgent {
+    # Uninstall.exe /S (or the agent's own uninstaller), wait for the service to go, then the
+    # registry key, so the fresh install registers from scratch.
+    $folder = Get-HuntressFolder
+    $uninstaller = @('Uninstall.exe', 'HuntressAgent.exe') | ForEach-Object { Join-Path $folder $_ } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($uninstaller) {
+        Write-Output "Removing the existing agent: $uninstaller /S"
+        Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait | Out-Null
+    }
+    $deadline = (Get-Date).AddMinutes(2)
+    while ((Get-Service -Name $AgentServiceName -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 5 }
+    if (Get-Service -Name $AgentServiceName -ErrorAction SilentlyContinue) { throw "The existing agent could not be removed - the $AgentServiceName service is still there." }
+    Remove-Item -LiteralPath $AgentRegistryKey -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 if ($OrganizationKey -match '["\r\n]') { Write-Output 'ERROR: OrganizationKey may not contain quotes or line breaks.'; exit 1 }
 
-New-Item -ItemType Directory -Path $DownloadDirectory, $TranscriptDirectory -Force | Out-Null
-$transcriptPath = Join-Path $TranscriptDirectory ('HuntressInstall_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.log')
-Start-Transcript -LiteralPath $transcriptPath -Append | Out-Null
+# Checked before the transcript starts: a GPO task runs this at every unlock and daily, and a
+# healthy machine should not collect a log file per run.
+$reason = ''
 if (-not $Reinstall -and (Get-Service -Name $AgentServiceName -ErrorAction SilentlyContinue)) {
-    Write-Output 'The Huntress agent is already installed. Nothing to do (use -Reinstall to install over it).'
-    Stop-Transcript | Out-Null
-    exit 0
+    $log = Join-Path (Get-HuntressFolder) 'HuntressAgent.log'
+    $tail = if (Test-Path -LiteralPath $log) { @(Get-Content -LiteralPath $log -Tail 20 -ErrorAction SilentlyContinue) } else { @() }
+    $registered = Get-ItemProperty -LiteralPath "$AgentRegistryKey\Huntress" -ErrorAction SilentlyContinue
+    $health = Get-HuntressHealth -LogTail $tail -RegisteredAccountKey "$($registered.AccountKey)" -RegisteredOrganizationKey "$($registered.OrganizationKey)"
+    switch ($health) {
+        'Healthy' {
+            Write-Output 'The Huntress agent is installed and healthy. Nothing to do (use -Reinstall to install over it).'
+            Send-HuntressReport -Status 'AlreadyInstalled' -Detail 'The HuntressAgent service exists; no 401 in the agent log.'
+            exit 0
+        }
+        'OrgMismatch' {
+            $detail = "Registered to organization '$($registered.OrganizationKey)', not '$OrganizationKey' - left as is (moved in the portal?)."
+            Write-Output $detail
+            Send-HuntressReport -Status 'OrgMismatch' -Detail $detail
+            exit 0
+        }
+        default {
+            $reason = if ($health -eq 'Orphaned') { "Orphaned: the agent log shows 'bad status code: 401' (removed on the Huntress side)." } else { 'Registered to another Huntress account.' }
+            if (-not (Test-HuntressRetryDue -MarkerPath $RetryMarker -Days $RetryDays)) {
+                $detail = "$reason Re-registration was tried $((Get-Item -LiteralPath $RetryMarker).LastWriteTime); next try after $RetryDays days."
+                Write-Output $detail
+                Send-HuntressReport -Status $health -Detail $detail
+                exit 1
+            }
+            Write-Output "$reason Re-registering."
+        }
+    }
 }
+
+New-Item -ItemType Directory -Path $DownloadDirectory, $TranscriptDirectory -Force | Out-Null
+$transcriptPath = Join-Path $TranscriptDirectory ('HuntressInstall_' + $env:COMPUTERNAME + '_' + (Get-Date -Format 'yyyyMMdd_HHmmss') + '.log')
+Start-Transcript -LiteralPath $transcriptPath -Append | Out-Null
+if ($reason) { Write-Output $reason }
 $exitCode = 1
+$detail = ''
 $installerPath = Join-Path $DownloadDirectory 'HuntressInstaller.exe'
 try {
     try {
@@ -59,6 +177,12 @@ try {
     if ($signer -notmatch $ExpectedSignerPattern) { throw "The installer is signed by '$signer', which does not match '$ExpectedSignerPattern'. Not installing." }
     Write-Output "Signature valid: $signer"
 
+    # Only now - with a verified installer in hand - does a broken agent come out.
+    if ($reason) {
+        Set-Content -LiteralPath $RetryMarker -Value (Get-Date -Format 's')
+        Remove-HuntressAgent
+    }
+
     # Not echoed: the argument list carries the account key.
     $installArgs = '/ACCT_KEY="' + $AccountKey + '" /ORG_KEY="' + $OrganizationKey + '" /S'
     $process = Start-Process -FilePath $installerPath -ArgumentList $installArgs -Wait -PassThru
@@ -73,11 +197,15 @@ try {
     if (-not $service) { throw "The installer finished but the $AgentServiceName service does not exist. See %ProgramFiles%\Huntress\HuntressAgent.log." }
     if ($service.Status -ne 'Running') { throw "The $AgentServiceName service is $($service.Status), not Running. See %ProgramFiles%\Huntress\HuntressAgent.log." }
     Write-Output 'The Huntress agent is installed and running.'
+    $detail = if ($reason) { "Re-registered. $reason" } else { 'Installed; the HuntressAgent service is running.' }
     $exitCode = 0
 } catch {
-    Write-Output "ERROR: $($_.Exception.Message)"
+    $detail = $_.Exception.Message
+    Write-Output "ERROR: $detail"
 } finally {
     Remove-Item -LiteralPath $installerPath -Force -ErrorAction SilentlyContinue
     Stop-Transcript | Out-Null
 }
+$status = if ($exitCode -ne 0) { 'Failed' } elseif ($reason) { 'Reinstalled' } else { 'Installed' }
+Send-HuntressReport -Status $status -Detail $detail -TranscriptPath $transcriptPath
 exit $exitCode
