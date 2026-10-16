@@ -25,6 +25,9 @@
     the HuntressAgent service. A transcript goes to the transcript folder below (the account key is
     never written to it). Exit code 0 on success, 1 on any failure.
 
+    With a local folder set (where a GPO copies this script), every run first limits that folder
+    to SYSTEM and Administrators - the copy carries the account key.
+
     With a report folder set, every run also writes <report>\Status\<COMPUTER>.json (Installed,
     Reinstalled, AlreadyInstalled, OrgMismatch, Orphaned, AccountMismatch or Failed), and an
     install copies its transcript to <report>\Transcripts. A report that can't be written is a
@@ -49,6 +52,7 @@ $DownloadDirectory     = {{DownloadDirectory}}
 $TranscriptDirectory   = {{TranscriptDirectory}}
 $ReportDirectory       = {{ReportDirectory}}
 $RetryDays             = {{RetryDays}}
+$LocalDirectory        = {{LocalDirectory}}
 $AgentServiceName      = 'HuntressAgent'
 $AgentRegistryKey      = 'HKLM:\SOFTWARE\Huntress Labs'
 $RetryMarker           = Join-Path $DownloadDirectory 'HuntressReregister.txt'
@@ -79,6 +83,26 @@ function Send-HuntressReport {
         }
     } catch {
         Write-Warning "Could not write the report to ${ReportDirectory}: $($_.Exception.Message)"
+    }
+}
+
+function Protect-HuntressLocalCopy {
+    # The GPO's local copy of this script carries the account key, and ProgramData is readable by
+    # every user: limit its folder to SYSTEM and Administrators (the files in it inherit that).
+    if (-not $LocalDirectory -or -not (Test-Path -LiteralPath $LocalDirectory -PathType Container)) { return }
+    try {
+        $current = Get-Acl -LiteralPath $LocalDirectory
+        $sids = @($current.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique)
+        if ($current.AreAccessRulesProtected -and (($sids -join ',') -eq 'S-1-5-18,S-1-5-32-544')) { return }
+        $acl = New-Object Security.AccessControl.DirectorySecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($sid in 'S-1-5-18', 'S-1-5-32-544') {
+            $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier($sid)), 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+        }
+        Set-Acl -LiteralPath $LocalDirectory -AclObject $acl
+        Write-Output "Limited $LocalDirectory to SYSTEM and Administrators."
+    } catch {
+        Write-Warning "Could not lock down ${LocalDirectory}: $($_.Exception.Message)"
     }
 }
 
@@ -122,6 +146,8 @@ function Remove-HuntressAgent {
 }
 
 if ($OrganizationKey -match '["\r\n]') { Write-Output 'ERROR: OrganizationKey may not contain quotes or line breaks.'; exit 1 }
+
+Protect-HuntressLocalCopy
 
 # Checked before the transcript starts: a GPO task runs this at every unlock and daily, and a
 # healthy machine should not collect a log file per run.

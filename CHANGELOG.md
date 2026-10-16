@@ -3,6 +3,11 @@
 All notable changes to NSP.ClientScripts are documented here. Versions follow
 [SemVer](https://semver.org/). `0.x` until it has real use outside NSP.
 
+## 0.1.5
+
+- `HuntressInstaller` recipe v4: `LocalDirectory` - the folder a GPO copies the script into. Every run first
+  limits it to SYSTEM and Administrators (ProgramData is readable by all users; the copy carries the account key).
+
 ## 0.1.4
 
 - `HuntressInstaller` recipe v3: an installed agent is checked, not just found - **orphaned** (`bad status code: 401`

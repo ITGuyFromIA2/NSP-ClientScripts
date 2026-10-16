@@ -312,6 +312,35 @@ Describe 'Installer recipes (ControlInstaller, HuntressInstaller)' {
         Test-HuntressRetryDue -MarkerPath $marker -Days 7 | Should -BeTrue
     }
 
+    It 'HuntressInstaller limits its local copy folder to SYSTEM and Administrators, and only that folder' {
+        $text = ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters ($HuntressBase + @{ LocalDirectory = 'C:\ProgramData\NSP\Huntress' })
+        $text | Should -Match ([regex]::Escape("`$LocalDirectory        = 'C:\ProgramData\NSP\Huntress'"))
+        $text.IndexOf("`r`nProtect-HuntressLocalCopy") | Should -BeLessThan $text.IndexOf('Get-HuntressHealth -LogTail') -Because 'every run, healthy ones included'
+        { ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters ($HuntressBase + @{ LocalDirectory = '\\server\share' }) } | Should -Throw '*does not match*'
+        $ast = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$null, [ref]$null)
+        $fn = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Protect-HuntressLocalCopy' }, $true)
+        . ([scriptblock]::Create($fn.Extent.Text))
+        $dir = Join-Path $TestDrive 'localcopy'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $dir 'HuntressInstall.ps1') -Value 'key'
+        Set-Variable -Name LocalDirectory -Value ''
+        Protect-HuntressLocalCopy
+        (Get-Acl -LiteralPath $dir).AreAccessRulesProtected | Should -BeFalse -Because 'blank = leave folders alone'
+        Set-Variable -Name LocalDirectory -Value $dir
+        try {
+            Protect-HuntressLocalCopy | Out-Null
+            $acl = Get-Acl -LiteralPath $dir
+            $acl.AreAccessRulesProtected | Should -BeTrue
+            @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique) | Should -Be @('S-1-5-18', 'S-1-5-32-544')
+            @((Get-Acl -LiteralPath (Join-Path $dir 'HuntressInstall.ps1')).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique) | Should -Be @('S-1-5-18', 'S-1-5-32-544') -Because 'the script inside inherits it'
+        } finally {
+            # Give the folder back to the test account (an owner can always rewrite the DACL) so TestDrive cleans up.
+            $back = Get-Acl -LiteralPath $dir
+            $back.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
+            Set-Acl -LiteralPath $dir -AclObject $back
+        }
+    }
+
     It 'HuntressInstaller verifies the new installer before it removes a broken agent' {
         $text = ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters $HuntressBase
         $text.IndexOf("if (`$signer -notmatch") | Should -BeLessThan $text.IndexOf("    Remove-HuntressAgent`r`n")
