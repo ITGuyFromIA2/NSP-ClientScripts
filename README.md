@@ -28,6 +28,20 @@ A generated shim, run on a server:
 That two-call contract is all a shim knows about a tool, so an old shim keeps working with newer
 modules.
 
+Three opt-in switches on `New-NSPToolShim` (recipe v2). Without them, a shim behaves as a v1 shim
+did: elevated, it starts in System32 and closes when the tool returns.
+
+| Switch | Effect |
+|---|---|
+| `-StartInShimFolder` | The tool starts in the shim's folder, for tools that work on files shipped beside it. |
+| `-PauseOnExit` | Waits for Enter after the tool returns or fails, so a one-shot tool's results stay on screen. |
+| `-WithCmd` | Also writes `<name>.cmd`, which runs the shim with a double-click (a double-clicked `.ps1` opens Notepad). |
+
+```powershell
+New-NSPToolShim -ToolName 'Certificate Install' -ModuleName NSP.SSLCertificates -ModuleMinimumVersion 0.2.0 `
+    -EntryFunction Install-NSPSslCertificate -StartInShimFolder -PauseOnExit -WithCmd -Path .\Install-Certificate.ps1
+```
+
 ```powershell
 New-NSPToolShim -ToolName 'AD Manager' -ModuleName NSP.ActiveDirectory -ModuleMinimumVersion 0.1.0 `
     -EntryFunction Start-NSPADManager -SeedAnswers @{ CompanyName = 'Example Co' } -Path C:\Temp\AD-Manager.ps1

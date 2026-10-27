@@ -12,6 +12,7 @@
       3. hands the answers embedded below to the tool once - the tool keeps them in
          %ProgramData%\NSP\Toolkit (Administrators and SYSTEM only) - and blanks them from this file;
       4. starts the tool.
+    A .cmd file of the same name beside it, if there is one, runs it with a double-click.
 
 .PARAMETER ModuleRoot
     Load the modules from this folder (one sub-folder per module) instead of installing them from
@@ -32,6 +33,8 @@ $ModuleName              = {{ModuleName}}
 $ModuleMinimumVersion    = {{ModuleMinimumVersion}}
 $EntryFunction           = {{EntryFunction}}
 $BootstrapMinimumVersion = {{BootstrapMinimumVersion}}
+$StartInShimFolder       = {{StartInShimFolder}}
+$PauseOnExit             = {{PauseOnExit}}
 $RequiredModulesJson = @'
 {{Modules}}
 '@
@@ -91,6 +94,9 @@ try {
     Stop-Shim "Could not load $ModuleName $ModuleMinimumVersion or later: $($_.Exception.Message)"
 }
 
+# Elevated, the shim starts in System32; a tool that works on files shipped beside it starts here.
+if ($StartInShimFolder) { Set-Location -LiteralPath $PSScriptRoot }
+
 # 3. Hand the embedded answers to the tool once, then blank them in this file.
 if ($SeedAnswersJson.Trim()) {
     & $EntryFunction -SeedAnswersJson $SeedAnswersJson -SeedOnly
@@ -109,4 +115,9 @@ if ($SeedAnswersJson.Trim()) {
 }
 
 # 4. Start the tool.
-& $EntryFunction
+if (-not $PauseOnExit) {
+    & $EntryFunction
+} else {
+    try { & $EntryFunction } catch { Stop-Shim "$ToolName stopped: $($_.Exception.Message)" }
+    if (-not $env:NSP_SHIM_NONINTERACTIVE) { Write-Host ''; Read-Host 'Press Enter to close' | Out-Null }
+}

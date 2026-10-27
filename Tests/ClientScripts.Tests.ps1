@@ -22,8 +22,9 @@ BeforeAll {
         Set-Content -LiteralPath (Join-Path $dir 'NSP.FakeTool.psm1') -Value @'
 function Start-NSPFakeTool {
     param([string]$SeedAnswersJson, [switch]$SeedOnly)
-    $entry = [ordered]@{ SeedOnly = [bool]$SeedOnly; Seed = $SeedAnswersJson }
+    $entry = [ordered]@{ SeedOnly = [bool]$SeedOnly; Seed = $SeedAnswersJson; Location = (Get-Location).ProviderPath }
     Add-Content -LiteralPath $env:NSP_FAKE_TOOL_LOG -Value (ConvertTo-Json -InputObject $entry -Compress) -Encoding UTF8
+    if ($env:NSP_FAKE_TOOL_THROW) { throw 'fake failure' }
 }
 '@
         return $Root
@@ -210,6 +211,43 @@ Describe 'Generated ToolShim, run for real against a fake tool' {
         $run.ExitCode | Should -Be 1
         $run.Output | Should -Match 'Could not load NSP.FakeTool 9.0.0'
     }
+
+    It 'starts the tool in the shim folder only with -StartInShimFolder' {
+        $shim = Join-Path $script:Root 'Default.ps1'
+        New-NSPToolShim @ShimBase -Path $shim | Out-Null
+        (Invoke-Shim $shim @('-ModuleRoot', $script:Root, '-NoElevate')).ExitCode | Should -Be 0
+        (Get-Content -LiteralPath $shim -Raw) | Should -Match '\$StartInShimFolder\s+= \$false'
+        @(Read-FakeLog)[0].Location | Should -Not -Be $script:Root
+
+        Remove-Item -LiteralPath $env:NSP_FAKE_TOOL_LOG
+        $shim = Join-Path $script:Root 'InFolder.ps1'
+        New-NSPToolShim @ShimBase -StartInShimFolder -Path $shim | Out-Null
+        (Invoke-Shim $shim @('-ModuleRoot', $script:Root, '-NoElevate')).ExitCode | Should -Be 0
+        @(Read-FakeLog)[0].Location | Should -Be $script:Root
+    }
+
+    It 'reports a failing tool and exits 1 with -PauseOnExit' {
+        $shim = Join-Path $script:Root 'Pause.ps1'
+        New-NSPToolShim @ShimBase -PauseOnExit -Path $shim | Out-Null
+        $env:NSP_FAKE_TOOL_THROW = '1'
+        try { $run = Invoke-Shim $shim @('-ModuleRoot', $script:Root, '-NoElevate') } finally { Remove-Item Env:\NSP_FAKE_TOOL_THROW }
+        $run.ExitCode | Should -Be 1
+        $run.Output | Should -Match 'Fake Tool stopped: fake failure'
+    }
+
+    It 'writes a .cmd launcher with -WithCmd that runs the shim beside it' {
+        $shim = Join-Path $script:Root 'Fake Tool (Install).ps1'
+        $files = @(New-NSPToolShim @ShimBase -WithCmd -Path $shim)
+        $files.Count | Should -Be 2
+        $cmd = Join-Path $script:Root 'Fake Tool (Install).cmd'
+        (Get-Content -LiteralPath $cmd -Raw) | Should -Match ([regex]::Escape('-File "%~dp0Fake Tool (Install).ps1" %*'))
+        $env:NSP_SHIM_NONINTERACTIVE = '1'
+        try { & cmd.exe /c "`"$cmd`" -ModuleRoot `"$script:Root`" -NoElevate" | Out-Null } finally { Remove-Item Env:\NSP_SHIM_NONINTERACTIVE }
+        $LASTEXITCODE | Should -Be 0
+        @(Read-FakeLog).Count | Should -Be 1
+        { New-NSPToolShim @ShimBase -WithCmd -Path $shim } | Should -Throw '*already exists*'
+        { New-NSPToolShim @ShimBase -WithCmd -Path (Join-Path $script:Root 'a&b.ps1') } | Should -Throw '*file name*'
+    }
 }
 
 Describe 'Installer recipes (ControlInstaller, HuntressInstaller)' {
@@ -312,7 +350,8 @@ Describe 'Installer recipes (ControlInstaller, HuntressInstaller)' {
         Test-HuntressRetryDue -MarkerPath $marker -Days 7 | Should -BeTrue
     }
 
-    It 'HuntressInstaller limits its local copy folder to SYSTEM and Administrators, and only that folder' {
+    # Elevated only: once locked, a non-elevated token cannot read the folder's ACLs back (the real script runs as SYSTEM).
+    It 'HuntressInstaller limits its local copy folder to SYSTEM and Administrators, and only that folder' -Skip:(-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         $text = ConvertTo-NSPClientScript -Recipe HuntressInstaller -Parameters ($HuntressBase + @{ LocalDirectory = 'C:\ProgramData\NSP\Huntress' })
         $text | Should -Match ([regex]::Escape("`$LocalDirectory        = 'C:\ProgramData\NSP\Huntress'"))
         $text.IndexOf("`r`nProtect-HuntressLocalCopy") | Should -BeLessThan $text.IndexOf('Get-HuntressHealth -LogTail') -Because 'every run, healthy ones included'
@@ -335,9 +374,8 @@ Describe 'Installer recipes (ControlInstaller, HuntressInstaller)' {
             @((Get-Acl -LiteralPath (Join-Path $dir 'HuntressInstall.ps1')).GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object { $_.IdentityReference.Value } | Sort-Object -Unique) | Should -Be @('S-1-5-18', 'S-1-5-32-544') -Because 'the script inside inherits it'
         } finally {
             # Give the folder back to the test account (an owner can always rewrite the DACL) so TestDrive cleans up.
-            $back = Get-Acl -LiteralPath $dir
-            $back.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule([Security.Principal.WindowsIdentity]::GetCurrent().User, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
-            Set-Acl -LiteralPath $dir -AclObject $back
+            # icacls, not Set-Acl: Set-Acl wants SeSecurityPrivilege, which a non-elevated shell does not hold.
+            & icacls.exe $dir /grant "*$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value):(OI)(CI)F" | Out-Null
         }
     }
 

@@ -3,6 +3,15 @@
 All notable changes to NSP.ClientScripts are documented here. Versions follow
 [SemVer](https://semver.org/). `0.x` until it has real use outside NSP.
 
+## 0.1.6
+
+- `ToolShim` recipe v2, with three opt-in switches on `New-NSPToolShim`. Without them a shim
+  behaves as before.
+  - `-StartInShimFolder`: the tool starts in the shim's folder instead of System32.
+  - `-PauseOnExit`: waits for Enter after the tool returns, and reports a failure instead of closing.
+  - `-WithCmd`: also writes a double-clickable `<name>.cmd` beside the shim.
+- Used by NSP.SSLCertificates 0.2.0 for the certificate-install shim it writes next to the PFX.
+
 ## 0.1.5
 
 - `HuntressInstaller` recipe v4: `LocalDirectory` - the folder a GPO copies the script into. Every run first

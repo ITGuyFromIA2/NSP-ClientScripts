@@ -1,6 +1,6 @@
 @{
     Name        = 'ToolShim'
-    Version     = '1'
+    Version     = '2'
     Description = 'Small launcher for an NSP module-hosted tool: elevates, installs the modules it needs from the PowerShell Gallery (or loads them from -ModuleRoot), hands embedded seed answers to the tool once and blanks them from the file, then starts the tool.'
     Template    = 'Template.ps1.template'
 
@@ -18,5 +18,10 @@
         @{ Name = 'Company';                 Type = 'Text';    Required = $false; Default = '(not set)' }
         @{ Name = 'GeneratedBy';             Type = 'Text';    Required = $false; Default = 'New-NSPToolShim' }
         @{ Name = 'BootstrapMinimumVersion'; Type = 'Version'; Required = $false; Default = '0.1.3' }
+        # v2, both off by default so a shim behaves as v1 did (elevated, it starts in System32 and
+        # closes when the tool returns). StartInShimFolder suits tools that work on files shipped
+        # next to the shim; PauseOnExit suits one-shot tools whose results would otherwise vanish.
+        @{ Name = 'StartInShimFolder';       Type = 'Bool';    Required = $false; Default = $false }
+        @{ Name = 'PauseOnExit';             Type = 'Bool';    Required = $false; Default = $false }
     )
 }
